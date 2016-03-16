@@ -9,10 +9,12 @@
 --    Simple test for VGA control
 --
 -------------------------------------------------------------------------------
+
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.std_logic_arith.all;
 use ieee.std_logic_unsigned.all;
+
 
 entity top is
   generic (
@@ -32,7 +34,10 @@ entity top is
     sync_o         : out std_logic;
     red_o          : out std_logic_vector(7 downto 0);
     green_o        : out std_logic_vector(7 downto 0);
-    blue_o         : out std_logic_vector(7 downto 0)
+    blue_o         : out std_logic_vector(7 downto 0);
+    -- direct_mode i display_mode za prekidace
+    direct_mode_i : in std_logic;
+    display_mode_i : in std_logic_vector(1 downto 0)
    );
 end top;
 
@@ -122,6 +127,21 @@ architecture rtl of top is
   end component;
   
   
+  component counter IS 
+		GENERIC (
+
+				WIDTH    : positive := 10
+		);
+		PORT (
+			   clk_i     : IN STD_LOGIC;
+			   rst_i     : IN STD_LOGIC;
+			   cnt_rst_i : IN STD_LOGIC;
+			   cnt_en_i  : IN STD_LOGIC;
+				cnt_o  : out std_logic_vector(WIDTH-1 downto 0)
+			 );
+	END component;
+  
+  
   constant update_period     : std_logic_vector(31 downto 0) := conv_std_logic_vector(1, 32);
   
   constant GRAPH_MEM_ADDR_WIDTH : natural := MEM_ADDR_WIDTH + 6;-- graphics addres is scales with minumum char size 8*8 log2(64) = 6
@@ -157,6 +177,21 @@ architecture rtl of top is
   signal dir_pixel_column    : std_logic_vector(10 downto 0);
   signal dir_pixel_row       : std_logic_vector(10 downto 0);
 
+	type color_array is array(7 downto 0) of std_logic_vector(23 downto 0);
+	signal colors : color_array := (
+		x"ffffff", x"cccc00", x"00ccff", x"00cc00", 
+		x"e600e6", x"ff0000", x"0000ff", x"000000" );
+	type char_array is array(6 downto 0) of std_logic_vector(5 downto 0);
+	
+	signal chars : char_array := ("000001", "000010", "000011", "000100", "000101", "000110", "000111");
+	
+	signal cnt1 : std_logic_vector(MEM_ADDR_WIDTH-1 downto 0);
+	signal cnt2 : std_logic_vector(GRAPH_MEM_ADDR_WIDTH-1 downto 0);
+	signal cnt_en_s : std_logic;
+	signal cnt1_rst : std_logic;
+	signal cnt2_rst : std_logic;
+	signal in_rectangle : std_logic;
+	constant CNT2_MAX : integer := H_RES/GRAPH_MEM_DATA_WIDTH*V_RES;
 begin
 
   -- calculate message lenght from font size
@@ -168,8 +203,10 @@ begin
   graphics_lenght <= conv_std_logic_vector(MEM_SIZE*8*8, GRAPH_MEM_ADDR_WIDTH);
   
   -- removed to inputs pin
-  direct_mode <= '1';
-  display_mode     <= "10";  -- 01 - text mode, 10 - graphics mode, 11 - text & graphics
+  -- direct_mode <= '1';
+  -- display_mode     <= "10";  -- 01 - text mode, 10 - graphics mode, 11 - text & graphics
+  direct_mode <= direct_mode_i;
+  display_mode <= display_mode_i;
   
   font_size        <= x"1";
   show_frame       <= '1';
@@ -194,6 +231,30 @@ begin
     S  => '0'                -- 1-bit set input
   );
   pix_clock_n <= not(pix_clock_s);
+
+  counter1 : counter
+  generic map(
+	WIDTH => MEM_ADDR_WIDTH
+  ) port map (
+	clk_i => pix_clock_s,
+	rst_i => vga_rst_n_s,
+	cnt_rst_i => cnt1_rst,
+	cnt_en_i => cnt_en_s,
+	cnt_o => cnt1
+  );
+  
+  counter2 : counter
+  generic map(
+	WIDTH => GRAPH_MEM_ADDR_WIDTH
+  ) port map (
+	clk_i => pix_clock_s,
+	rst_i => vga_rst_n_s,
+	cnt_rst_i => cnt2_rst,
+	cnt_en_i => cnt_en_s,
+	cnt_o => cnt2
+  );
+
+	
 
   -- component instantiation
   vga_top_i: vga_top
@@ -246,20 +307,40 @@ begin
     blue_o             => blue_o     
   );
   
+  
+  cnt1_rst <= '1';
+--  cnt2_rst <= '1';
+  
   -- na osnovu signala iz vga_top modula dir_pixel_column i dir_pixel_row realizovati logiku koja genereise
   --dir_red
   --dir_green
   --dir_blue
- 
+  
+  dir_red <= colors( conv_integer( dir_pixel_column(10 downto 8) ) )( 23 downto 16 );
+  dir_green <= colors( conv_integer( dir_pixel_column(10 downto 8) ) )( 15 downto 8 );
+  dir_blue <= colors( conv_integer( dir_pixel_column(10 downto 8) ) )( 7 downto 0 );
+  
   -- koristeci signale realizovati logiku koja pise po TXT_MEM
-  --char_address
-  --char_value
-  --char_we
+  -- char_address
+  -- char_value
+  -- char_we
+  
+  char_address <= cnt1;
+  char_value <= chars(conv_integer( cnt1 ));
+  char_we <= '1' when cnt1 < chars'length else '0';
+  
+  cnt_en_s <= '1' when direct_mode = '0' and display_mode /= "00" else '0';
   
   -- koristeci signale realizovati logiku koja pise po GRAPH_MEM
-  --pixel_address
-  --pixel_value
-  --pixel_we
+  -- pixel_address
+  -- pixel_value
+  -- pixel_we
   
+  cnt2_rst <= '0' when cnt2 >= CNT2_MAX else '1';
+  in_rectangle <= '1' when dir_pixel_column > H_RES/4 and dir_pixel_column < 3*H_RES/4 and
+						   dir_pixel_row > V_RES/4 and dir_pixel_row < 3*V_RES/4;
+  pixel_address <= cnt2 when cnt2 < CNT2_MAX else (others => '0');
+  pixel_value <= (others => '1') when in_rectangle = '1';
+  pixel_we <= '1' when in_rectangle = '1' and cnt2 < CNT2_MAX else '0';
   
 end rtl;
